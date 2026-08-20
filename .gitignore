@@ -1,0 +1,25 @@
+# Environment variables and secrets
+.env
+.env.*
+
+# Personal holdings/portfolio data (real allocations, not for public repo)
+holdings.csv
+portfolio_*.csv
+Version_*.csv
+
+# Real report runs (contain real holdings/metrics); example reports are tracked explicitly
+reports/*.md
+!reports/example_*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
