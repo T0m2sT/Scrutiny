@@ -460,6 +460,132 @@ def fetch_stock_data(ticker, name, fx: FXConverter, fmp: FMPClient):
     return out
 
 
+def compute_portfolio_analytics(stocks, holdings, fx: FXConverter, rf_rate=0.045):
+    """
+    Computes HHI concentration, weighted fundamentals, and FX-adjusted 1-year historical
+    portfolio performance (Return, Annualized Volatility, Sharpe Ratio, Max Drawdown).
+    """
+    weights = {h["ticker"]: h["target_weight"] for h in holdings}
+    hhi = sum(w ** 2 for w in weights.values())
+    sorted_weights = sorted(weights.values(), reverse=True)
+    top3_weight = sum(sorted_weights[:3])
+    top5_weight = sum(sorted_weights[:5])
+    top10_weight = sum(sorted_weights[:10])
+
+    sector_weight = {}
+    for h in holdings:
+        s = stocks.get(h["ticker"], {})
+        sec = s.get("sector") or "Unknown / Other"
+        sector_weight[sec] = sector_weight.get(sec, 0.0) + h["target_weight"]
+    sector_weight = dict(sorted(sector_weight.items(), key=lambda x: -x[1]))
+
+    def weighted_stat(metric_key, harmonic=False):
+        valid_pairs = []
+        for h in holdings:
+            s = stocks.get(h["ticker"], {})
+            val = s.get(metric_key)
+            if val is not None and isinstance(val, (int, float)) and not np.isnan(val):
+                if harmonic and val <= 0:
+                    continue
+                valid_pairs.append((h["target_weight"], float(val)))
+        if not valid_pairs:
+            return None
+        total_w = sum(w for w, _ in valid_pairs)
+        if total_w <= 0:
+            return None
+        if harmonic:
+            inv_sum = sum(w / v for w, v in valid_pairs)
+            return (total_w / inv_sum) if inv_sum > 0 else None
+        return sum(w * v for w, v in valid_pairs) / total_w
+
+    weighted_pe_trailing = weighted_stat("pe_trailing", harmonic=True)
+    weighted_pe_forward = weighted_stat("pe_forward", harmonic=True)
+    weighted_beta = weighted_stat("beta")
+    weighted_div_yield = weighted_stat("dividend_yield")
+    weighted_rev_growth = weighted_stat("revenue_growth")
+    weighted_op_margin = weighted_stat("operating_margin")
+
+    valid_tickers = [h["ticker"] for h in holdings if stocks.get(h["ticker"], {}).get("quote_price")]
+    corr_matrix = None
+    avg_pairwise_corr = None
+    port_1y_return = None
+    port_1y_volatility = None
+    port_1y_sharpe = None
+    port_1y_max_drawdown = None
+
+    if valid_tickers:
+        try:
+            df_hist = yf.download(valid_tickers, period="1y", interval="1d", progress=False)
+            if df_hist is not None and not df_hist.empty:
+                px = df_hist["Close"] if "Close" in df_hist else df_hist
+                if isinstance(px, pd.Series):
+                    px = px.to_frame(name=valid_tickers[0])
+
+                base_px = pd.DataFrame(index=px.index)
+                for t in px.columns:
+                    s_data = stocks.get(t, {})
+                    q_ccy = s_data.get("quote_currency", "USD")
+                    fx_series = fx.get_historical_fx_series(q_ccy, px.index)
+                    base_px[t] = px[t] * fx_series
+
+                daily_returns = base_px.pct_change(fill_method=None).dropna(how="all")
+
+                if daily_returns.shape[1] > 1:
+                    corr_matrix = daily_returns.corr()
+                    vals = []
+                    cols = corr_matrix.columns
+                    for i in range(len(cols)):
+                        for j in range(i + 1, len(cols)):
+                            v = corr_matrix.iloc[i, j]
+                            if pd.notna(v):
+                                vals.append(v)
+                    if vals:
+                        avg_pairwise_corr = statistics.mean(vals)
+
+                active_weights = {t: weights[t] for t in daily_returns.columns if t in weights}
+                sum_active_w = sum(active_weights.values())
+                if sum_active_w > 0:
+                    norm_active_w = {t: w / sum_active_w for t, w in active_weights.items()}
+                    weight_series = pd.Series(norm_active_w)
+                    aligned_returns = daily_returns[weight_series.index]
+                    port_daily_ret = aligned_returns.dot(weight_series).dropna()
+
+                    if len(port_daily_ret) > 30:
+                        cum_returns = (1 + port_daily_ret).cumprod()
+                        port_1y_return = float(cum_returns.iloc[-1] - 1.0)
+                        daily_std = float(port_daily_ret.std())
+                        port_1y_volatility = daily_std * np.sqrt(252)
+                        annualized_ret = float((1 + port_1y_return) ** (252 / len(port_daily_ret)) - 1.0)
+                        if port_1y_volatility > 0:
+                            port_1y_sharpe = (annualized_ret - rf_rate) / port_1y_volatility
+                        peak = cum_returns.cummax()
+                        drawdowns = (cum_returns - peak) / peak
+                        port_1y_max_drawdown = float(drawdowns.min())
+
+        except Exception as e:
+            print(f"[!] Historical return computation notice: {e}")
+
+    return {
+        "hhi": hhi,
+        "top3_weight": top3_weight,
+        "top5_weight": top5_weight,
+        "top10_weight": top10_weight,
+        "sector_weight": sector_weight,
+        "weighted_pe_trailing": weighted_pe_trailing,
+        "weighted_pe_forward": weighted_pe_forward,
+        "weighted_beta": weighted_beta,
+        "weighted_div_yield": weighted_div_yield,
+        "weighted_rev_growth": weighted_rev_growth,
+        "weighted_op_margin": weighted_op_margin,
+        "avg_pairwise_correlation": avg_pairwise_corr,
+        "correlation_matrix": corr_matrix,
+        "port_1y_return": port_1y_return,
+        "port_1y_volatility": port_1y_volatility,
+        "port_1y_sharpe": port_1y_sharpe,
+        "port_1y_max_drawdown": port_1y_max_drawdown,
+    }
+
+
 def main():
     args = parse_args()
     holdings_path = Path(args.holdings_file)
@@ -493,7 +619,10 @@ def main():
                 "note": f"Exception encountered: {str(e)}",
             }
 
-    print("[*] TODO: compute portfolio analytics and write report.")
+    print("[*] Computing portfolio-level risk, concentration, and FX-adjusted return analytics...")
+    portfolio = compute_portfolio_analytics(stocks, holdings, fx=fx, rf_rate=args.rf_rate)
+
+    print("[*] TODO: build markdown report and CLI summary.")
 
 
 if __name__ == "__main__":
