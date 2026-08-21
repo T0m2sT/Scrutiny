@@ -214,13 +214,132 @@ class FXConverter:
         return aligned
 
 
+def load_holdings(path):
+    """Load and validate holdings CSV."""
+    rows = []
+    filepath = Path(path)
+    if not filepath.exists():
+        raise FileNotFoundError(f"Holdings file not found: {filepath}")
+
+    with open(filepath, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            ticker = r["ticker"].strip().upper()
+            name = r["name"].strip()
+            weight = float(r["target_weight"])
+            rows.append({
+                "ticker": ticker,
+                "name": name,
+                "target_weight": weight,
+            })
+
+    total_weight = sum(r["target_weight"] for r in rows)
+    if not (0.999 <= total_weight <= 1.001):
+        print(f"[!] Warning: Target weights sum to {total_weight*100:.2f}% (not 100.0%). Normalizing...")
+        for r in rows:
+            r["target_weight"] = r["target_weight"] / total_weight
+    else:
+        print(f"[+] Verified target weights sum to {total_weight*100:.1f}%.")
+
+    return rows
+
+
+def safe_get(d, *keys, default=None):
+    """Safely retrieves first non-None value from dictionary."""
+    if not isinstance(d, dict):
+        return default
+    for k in keys:
+        v = d.get(k)
+        if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            return v
+    return default
+
+
+def fetch_stock_data(ticker, name, fx: FXConverter, fmp: FMPClient):
+    """Pulls valuation and fundamentals for a ticker via yfinance, converting
+    the quoted price to base currency."""
+    t = yf.Ticker(ticker)
+    info = {}
+    try:
+        info = t.info if hasattr(t, "info") and isinstance(t.info, dict) else {}
+    except Exception as e:
+        info = {"_error": str(e)}
+
+    raw_price = safe_get(info, "currentPrice", "regularMarketPrice", "previousClose", "ask", "bid")
+    quote_ccy = safe_get(info, "currency", default="USD")
+    financial_ccy = safe_get(info, "financialCurrency", default=quote_ccy)
+
+    price_fx_rate, _ = fx.get_spot_rate_to_base(quote_ccy)
+    base_price = (raw_price * price_fx_rate) if (raw_price is not None and price_fx_rate) else None
+
+    raw_analyst_target = safe_get(info, "targetMeanPrice")
+    base_analyst_target = (raw_analyst_target * price_fx_rate) if (raw_analyst_target is not None and price_fx_rate) else None
+    analyst_upside_pct = None
+    if base_price and base_analyst_target and base_price > 0:
+        analyst_upside_pct = (base_analyst_target - base_price) / base_price
+
+    raw_forward_eps = safe_get(info, "forwardEps")
+    base_forward_eps = None
+    if raw_forward_eps is not None:
+        eps_fx_rate, _ = fx.get_spot_rate_to_base(financial_ccy)
+        base_forward_eps = raw_forward_eps * eps_fx_rate
+
+    simple_fair_value_15x = None
+    if base_forward_eps and base_forward_eps > 0:
+        simple_fair_value_15x = round(base_forward_eps * 15.0, 2)
+
+    out = {
+        "ticker": ticker,
+        "name": name,
+        "quote_price": raw_price,
+        "quote_currency": quote_ccy,
+        "base_price": base_price,
+        "financial_currency": financial_ccy,
+        "pe_trailing": safe_get(info, "trailingPE"),
+        "pe_forward": safe_get(info, "forwardPE"),
+        "peg": safe_get(info, "trailingPegRatio", "pegRatio"),
+        "dividend_yield": safe_get(info, "trailingAnnualDividendYield"),
+        "beta": safe_get(info, "beta"),
+        "debt_to_equity": safe_get(info, "debtToEquity"),
+        "revenue_growth": safe_get(info, "revenueGrowth"),
+        "operating_margin": safe_get(info, "operatingMargins"),
+        "analyst_target_raw": raw_analyst_target,
+        "analyst_target_base": base_analyst_target,
+        "analyst_upside_pct": analyst_upside_pct,
+        "simple_fair_value_15x": simple_fair_value_15x,
+        "sector": safe_get(info, "sector", default="Unknown / Other"),
+        "industry": safe_get(info, "industry", default=""),
+        "market_cap": safe_get(info, "marketCap"),
+        "data_quality": "live" if raw_price is not None else "web_fallback_needed",
+    }
+    if out["data_quality"] == "web_fallback_needed":
+        out["note"] = "No live market quote on Yahoo Finance. Check if newly listed or needs alternate ticker symbol."
+
+    return out
+
+
 def main():
     args = parse_args()
+    holdings_path = Path(args.holdings_file)
     base_currency = args.base_currency.upper()
     print(f"[*] Initializing engine (Base Currency: {base_currency})...")
     fx = FXConverter(base_currency=base_currency)
     fmp = FMPClient()
-    print("[*] TODO: load holdings, fetch data, compute analytics, write report.")
+
+    print(f"[*] Loading portfolio holdings from {holdings_path}...")
+    holdings = load_holdings(holdings_path)
+
+    stocks = {}
+    print("[*] Fetching live fundamental and market data...")
+    for i, h in enumerate(holdings, 1):
+        ticker = h["ticker"]
+        name = h["name"]
+        print(f"  [{i:02d}/{len(holdings):02d}] Fetching {ticker:<8} ({name})...", end="", flush=True)
+        data = fetch_stock_data(ticker, name, fx, fmp)
+        stocks[ticker] = data
+        print(" Done" if data.get("data_quality") == "live" else " [!] No live price (Flagged)")
+
+    print("[*] TODO: compute portfolio analytics and write report.")
 
 
 if __name__ == "__main__":
