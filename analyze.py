@@ -586,6 +586,196 @@ def compute_portfolio_analytics(stocks, holdings, fx: FXConverter, rf_rate=0.045
     }
 
 
+def fmt_pct(x, signed=False):
+    if x is None or not isinstance(x, (int, float)) or np.isnan(x):
+        return "n/a"
+    prefix = "+" if signed and x > 0 else ""
+    return f"{prefix}{x * 100:.1f}%"
+
+
+def fmt_num(x, d=2, marker=""):
+    if x is None or not isinstance(x, (int, float)) or np.isnan(x):
+        return "n/a"
+    return f"{x:.{d}f}{marker}"
+
+
+def fmt_quote_price(price, ccy):
+    if price is None or not isinstance(price, (int, float)) or np.isnan(price):
+        return "n/a"
+    if ccy == "USD":
+        return f"${price:.2f}"
+    return f"{price:.2f} {ccy}"
+
+
+def fmt_base_price(price, base_ccy="USD"):
+    if price is None or not isinstance(price, (int, float)) or np.isnan(price):
+        return "n/a"
+    symbol = "$" if base_ccy == "USD" else f"{base_ccy} "
+    return f"{symbol}{price:.2f}"
+
+
+def build_report(holdings, stocks, portfolio, base_ccy="USD"):
+    """Builds a comprehensive Markdown report with FX normalization and fallback annotations."""
+    lines = []
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines.append(f"# Portfolio Investigation & Risk Report — {ts}\n")
+
+    # Section 1: Executive Summary
+    lines.append("## Executive Summary\n")
+    hhi = portfolio["hhi"]
+    hhi_label = "High Concentration" if hhi > 0.15 else "Moderate Concentration" if hhi > 0.10 else "Well Diversified"
+
+    lines.append(f"| Metric | Portfolio Value | Benchmark / Context |")
+    lines.append(f"|:---|:---|:---|")
+    lines.append(f"| **Portfolio Base Currency** | **{base_ccy}** | All foreign assets normalized dynamically |")
+    lines.append(f"| **Concentration (HHI)** | **{hhi:.4f}** ({hhi_label}) | < 0.10 = Broad, > 0.15 = Concentrated |")
+    lines.append(f"| **Top 5 Holdings Weight** | **{fmt_pct(portfolio['top5_weight'])}** | Target < 40-50% |")
+    lines.append(f"| **Weighted Portfolio Beta** | **{fmt_num(portfolio['weighted_beta'])}** | 1.0 = S&P 500 Market Beta |")
+    lines.append(f"| **Weighted P/E (Harmonic TTM)** | **{fmt_num(portfolio['weighted_pe_trailing'])}x** | S&P 500 ~ 25-28x |")
+    lines.append(f"| **Weighted Forward P/E** | **{fmt_num(portfolio['weighted_pe_forward'])}x** | S&P 500 ~ 20-22x |")
+    lines.append(f"| **Weighted Dividend Yield** | **{fmt_pct(portfolio['weighted_div_yield'])}** | S&P 500 ~ 1.3-1.5% |")
+    lines.append(f"| **Weighted Revenue Growth (YoY)** | **{fmt_pct(portfolio['weighted_rev_growth'])}** | Portfolio weighted average |")
+    lines.append(f"| **Weighted Operating Margin** | **{fmt_pct(portfolio['weighted_op_margin'])}** | Portfolio weighted average |")
+    if portfolio.get("port_1y_return") is not None:
+        lines.append(f"| **1-Year FX-Adjusted Return (Simulated)** | **{fmt_pct(portfolio['port_1y_return'], signed=True)}** | Denominated in {base_ccy} |")
+        lines.append(f"| **1-Year Annualized Volatility** | **{fmt_pct(portfolio['port_1y_volatility'])}** | S&P 500 ~ 13-16% |")
+        lines.append(f"| **Sharpe Ratio (1Y, Rf=4.5%)** | **{fmt_num(portfolio['port_1y_sharpe'])}** | > 1.0 = Good, > 2.0 = Excellent |")
+        lines.append(f"| **Max Drawdown (1Y Peak-to-Trough)** | **{fmt_pct(portfolio['port_1y_max_drawdown'])}** | Deepest simulated drawdown in 1Y |")
+    lines.append(f"| **Avg Pairwise Stock Correlation** | **{fmt_num(portfolio['avg_pairwise_correlation'], 3)}** | Lower indicates higher diversification benefit |")
+    lines.append("")
+
+    # Section 2: Detailed Per-Stock Battery (16 columns)
+    lines.append(f"## Per-Stock Fundamental & Valuation Battery (Normalized to {base_ccy})\n")
+    headers = [
+        "Ticker", "Name", "Target%", "Local Price", f"Price ({base_ccy})", "P/E (TTM)", "Fwd P/E",
+        "PEG", "Div Yield", "Analyst Target", "Upside%", "Simple FV (15x)",
+        "Rev Growth", "Op Margin", "Beta", "5Y CAGR", "Sector"
+    ]
+    lines.append("| " + " | ".join(headers) + " |")
+    aligns = [
+        ":---", ":---", "---:", "---:", "---:", "---:", "---:",
+        "---:", "---:", "---:", "---:", "---:",
+        "---:", "---:", "---:", "---:", ":---"
+    ]
+    lines.append("| " + " | ".join(aligns) + " |")
+
+    for h in holdings:
+        s = stocks.get(h["ticker"], {})
+        if s.get("data_quality") == "web_fallback_needed":
+            note_msg = s.get("note", "NO DATA")
+            lines.append(
+                f"| `{h['ticker']}` | {h['name']} | {fmt_pct(h['target_weight'])} | "
+                f"**NO DATA** | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | {note_msg} |"
+            )
+            continue
+
+        q_ccy = s.get("quote_currency", "USD")
+        fb = s.get("fallback_sources", {})
+
+        # Markers for fallback-sourced fields
+        fpe_marker = "*" if "pe_forward" in fb else ""
+        tpe_marker = "*" if "pe_trailing" in fb else ""
+        peg_marker = "*" if "peg" in fb else ""
+        dy_marker = "*" if "dividend_yield" in fb else ""
+        beta_marker = "*" if "beta" in fb else ""
+        upside_marker = "*" if "analyst_upside_pct" in fb else ""
+
+        row = [
+            f"`{h['ticker']}`",
+            h["name"][:20],
+            fmt_pct(h["target_weight"]),
+            fmt_quote_price(s.get("quote_price"), q_ccy),
+            fmt_base_price(s.get("base_price"), base_ccy),
+            fmt_num(s.get("pe_trailing"), marker=tpe_marker),
+            fmt_num(s.get("pe_forward"), marker=fpe_marker),
+            fmt_num(s.get("peg"), marker=peg_marker),
+            fmt_pct(s.get("dividend_yield")),
+            fmt_base_price(s.get("analyst_target_base"), base_ccy),
+            fmt_pct(s.get("analyst_upside_pct"), signed=True) + upside_marker,
+            fmt_base_price(s.get("simple_fair_value_15x"), base_ccy),
+            fmt_pct(s.get("revenue_growth"), signed=True),
+            fmt_pct(s.get("operating_margin")),
+            fmt_num(s.get("beta"), marker=beta_marker),
+            fmt_pct(s.get("price_cagr_5y")),
+            s.get("sector", "n/a"),
+        ]
+        lines.append("| " + " | ".join(row) + " |")
+
+    lines.append("\n> [!NOTE]")
+    lines.append("> **Valuation & Fallback Legend:**")
+    lines.append(f"> 1. **Values with `*`**: Sourced via secondary FMP API fallback or calculated via FX-normalized EPS after failing Yahoo's plausibility guards. For **Upside%**, this also includes cases where Yahoo's raw target/price implied an implausible upside (outside -90% to +150%, usually a currency-mismatch artifact) and was recomputed from FX-normalized base-currency prices, or replaced with an FMP consensus target.")
+    lines.append(f"> 2. **Multi-Currency Normalization**: Foreign assets (e.g. `HTWS.L` in GBp pence, `KAP.L` in KZT/USD) are normalized to `{base_ccy}` using live exchange rates.")
+    lines.append("> 3. **Simple FV (15x Forward EPS)**: Baseline Graham anchor in base currency for relative cross-checking.\n")
+
+    # Section 3: Fallback & Data Provenance
+    lines.append("## Data Provenance & Fallback Tracking\n")
+    fallbacks_found = False
+    for h in holdings:
+        s = stocks.get(h["ticker"], {})
+        fb = s.get("fallback_sources", {})
+        if fb:
+            fallbacks_found = True
+            fb_desc = ", ".join([f"`{k}` ({v})" for k, v in fb.items()])
+            lines.append(f"- **{h['name']} (`{h['ticker']}`)**: Fallback invoked for {fb_desc}")
+    if not fallbacks_found:
+        lines.append("- Primary Yahoo Finance data passed all plausibility guards across all tickers.")
+    lines.append("")
+
+    # Section 4: Sector Breakdown
+    lines.append("## Sector Exposure & Allocation\n")
+    lines.append("| Sector | Weight (%) | Cumulative Weight | Positions Count |")
+    lines.append("|:---|---:|---:|---:|")
+    cum_w = 0.0
+    for sec, w in portfolio["sector_weight"].items():
+        cum_w += w
+        pos_count = sum(1 for h in holdings if (stocks.get(h["ticker"], {}).get("sector") or "Unknown / Other") == sec)
+        lines.append(f"| {sec} | {fmt_pct(w)} | {fmt_pct(cum_w)} | {pos_count} |")
+
+    # Section 5: Data Quality Flags
+    lines.append("\n## Data Quality & Action Items\n")
+    flagged = [h for h in holdings if stocks.get(h["ticker"], {}).get("data_quality") != "live"]
+    if flagged:
+        for h in flagged:
+            s_info = stocks.get(h["ticker"], {})
+            lines.append(f"- **{h['name']} (`{h['ticker']}`)** [{fmt_pct(h['target_weight'])} weight]: {s_info.get('note', 'Incomplete data')}")
+    else:
+        lines.append("- All holdings successfully resolved live market quotes.")
+
+    return "\n".join(lines)
+
+
+def print_cli_summary(holdings, stocks, portfolio, base_ccy="USD"):
+    """Prints a clean CLI summary to the terminal."""
+    print("\n" + "=" * 88)
+    print(f"               MULTI-CURRENCY PORTFOLIO SUMMARY (BASE: {base_ccy})")
+    print("=" * 88)
+    print(f"Total Positions: {len(holdings)} | Top 5 Weight: {fmt_pct(portfolio['top5_weight'])} | HHI: {portfolio['hhi']:.4f}")
+    print(f"Weighted Beta:   {fmt_num(portfolio['weighted_beta'])}  | Weighted Fwd P/E: {fmt_num(portfolio['weighted_pe_forward'])}x | Div Yield: {fmt_pct(portfolio['weighted_div_yield'])}")
+    if portfolio.get("port_1y_return") is not None:
+        print(f"1Y Return (USD): {fmt_pct(portfolio['port_1y_return'], signed=True)} | 1Y Volatility: {fmt_pct(portfolio['port_1y_volatility'])} | Sharpe (Rf=4.5%): {fmt_num(portfolio['port_1y_sharpe'])}")
+    print("-" * 88)
+    print(f"{'Ticker':<8} {'Name':<18} {'Weight':<8} {'Local Px':<12} {f'Px ({base_ccy})':<11} {'Fwd P/E':<9} {'Beta':<6} {'Upside%':<9} {'Sector':<16}")
+    print("-" * 88)
+    for h in holdings[:12]:
+        s = stocks.get(h["ticker"], {})
+        t_sym = h["ticker"]
+        name = h["name"][:16]
+        w = fmt_pct(h["target_weight"])
+        local_p = fmt_quote_price(s.get("quote_price"), s.get("quote_currency", "USD"))
+        base_p = fmt_base_price(s.get("base_price"), base_ccy)
+        fb = s.get("fallback_sources", {})
+        fpe_marker = "*" if "pe_forward" in fb else ""
+        fpe = fmt_num(s.get("pe_forward"), marker=fpe_marker)
+        beta_marker = "*" if "beta" in fb else ""
+        beta = fmt_num(s.get("beta"), marker=beta_marker)
+        upside = fmt_pct(s.get("analyst_upside_pct"), signed=True)
+        sec = (s.get("sector") or "Unknown")[:15]
+        print(f"{t_sym:<8} {name:<18} {w:<8} {local_p:<12} {base_p:<11} {fpe:<9} {beta:<6} {upside:<9} {sec:<16}")
+    if len(holdings) > 12:
+        print(f"... and {len(holdings) - 12} more positions (see full markdown report).")
+    print("=" * 88 + "\n")
+
+
 def main():
     args = parse_args()
     holdings_path = Path(args.holdings_file)
@@ -607,7 +797,11 @@ def main():
             data = fetch_stock_data(ticker, name, fx, fmp)
             stocks[ticker] = data
             if data.get("data_quality") == "live":
-                print(" Done")
+                loc_p = fmt_quote_price(data.get("quote_price"), data.get("quote_currency", "USD"))
+                base_p = fmt_base_price(data.get("base_price"), base_currency)
+                fb = data.get("fallback_sources", {})
+                fb_msg = f" [Fallback: {', '.join(fb.keys())}]" if fb else ""
+                print(f" Done ({loc_p} -> {base_p}){fb_msg}")
             else:
                 print(" [!] No live price (Flagged)")
         except Exception as e:
@@ -622,7 +816,13 @@ def main():
     print("[*] Computing portfolio-level risk, concentration, and FX-adjusted return analytics...")
     portfolio = compute_portfolio_analytics(stocks, holdings, fx=fx, rf_rate=args.rf_rate)
 
-    print("[*] TODO: build markdown report and CLI summary.")
+    report_content = build_report(holdings, stocks, portfolio, base_ccy=base_currency)
+    out_filename = f"report_{datetime.now().strftime('%Y-%m-%d_%H%M')}.md"
+    out_path = REPORTS_DIR / out_filename
+    out_path.write_text(report_content, encoding="utf-8")
+    print(f"[+] Full Markdown report written to:\n    {out_path.resolve()}")
+
+    print_cli_summary(holdings, stocks, portfolio, base_ccy=base_currency)
 
 
 if __name__ == "__main__":
