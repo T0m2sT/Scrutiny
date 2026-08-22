@@ -371,6 +371,96 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
     }
 
 
+def find_previous_report(current_out_path):
+    """Finds the most recently modified report in REPORTS_DIR other than the
+    one currently being written, so we can diff assumed-return assumptions
+    across runs and flag whether a comparison is apples-to-apples."""
+    candidates = [p for p in REPORTS_DIR.glob("backtest_forecast_*.md") if p != current_out_path]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def parse_assumed_returns_from_report(path):
+    """Extracts the 'Ticker | Assumed Annual Return' table from a previously
+    written report, so a new run can be diffed against it. Returns a dict of
+    {ticker: return_as_fraction}, stripping any '*' fallback marker."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    result = {}
+    in_table = False
+    for line in text.splitlines():
+        if line.strip().startswith("### Expected annual return assumptions"):
+            in_table = True
+            continue
+        if in_table:
+            if line.strip().startswith("| Ticker"):
+                continue
+            if line.strip().startswith("|:---"):
+                continue
+            if line.strip().startswith("|") and "%" in line:
+                parts = [c.strip() for c in line.strip().strip("|").split("|")]
+                if len(parts) == 2:
+                    ticker = parts[0].rstrip("*").strip()
+                    try:
+                        pct = float(parts[1].rstrip("%").strip())
+                        result[ticker] = pct / 100.0
+                    except ValueError:
+                        pass
+            elif line.strip() == "" and result:
+                break
+    return result if result else None
+
+
+def build_assumption_diff_section(mc, current_out_path):
+    """Compares this run's assumed-return table against the most recent prior
+    report, if one exists, and reports whether the comparison is apples-to-
+    apples (identical assumptions - any MC difference is pure structure/
+    volatility/correlation) or assumptions-changed (a real, deliberate
+    difference exists, listed explicitly)."""
+    prev_path = find_previous_report(current_out_path)
+    if prev_path is None:
+        return ["## Assumption Diff vs. Previous Run\n",
+                "No previous report found in `reports/` to compare against - this is treated as the first baseline run.\n"]
+
+    prev_returns = parse_assumed_returns_from_report(prev_path)
+    if prev_returns is None:
+        return ["## Assumption Diff vs. Previous Run\n",
+                f"Could not parse assumed-return table from the most recent previous report (`{prev_path.name}`) - skipping diff.\n"]
+
+    current_returns = {t: r for t, r in mc["expected_returns_used"].items()}
+    common = set(prev_returns) & set(current_returns)
+    only_prev = set(prev_returns) - set(current_returns)
+    only_current = set(current_returns) - set(prev_returns)
+    changed = {t: (prev_returns[t], current_returns[t]) for t in common if abs(prev_returns[t] - current_returns[t]) > 1e-9}
+
+    lines = ["## Assumption Diff vs. Previous Run\n",
+             f"Compared against: `{prev_path.name}`\n"]
+
+    if not changed and not only_prev and not only_current:
+        lines.append("**IDENTICAL assumed-return assumptions on every shared ticker.** "
+                      "Any difference between this run's Monte Carlo results and the previous run's is "
+                      "purely from historical volatility/correlation structure and/or random-seed noise - "
+                      "NOT from a fundamentals-driven change. Do not interpret such a difference as one "
+                      "portfolio being fundamentally better.\n")
+    else:
+        lines.append("**Assumptions DIFFER from the previous run** - a Monte Carlo difference here may "
+                      "reflect a real, deliberate change, not just noise. Details:\n")
+        if changed:
+            lines.append("Changed assumed returns for shared tickers:")
+            for t, (old, new) in sorted(changed.items()):
+                lines.append(f"  - {t}: {old*100:.1f}% → {new*100:.1f}%")
+        if only_current:
+            lines.append(f"New tickers in this run (not in previous): {', '.join(sorted(only_current))}")
+        if only_prev:
+            lines.append(f"Tickers dropped since previous run: {', '.join(sorted(only_prev))}")
+        lines.append("")
+
+    return lines
+
+
 def main():
     args = parse_args()
     holdings = load_holdings(args.holdings_file)
@@ -391,7 +481,7 @@ def main():
         starting_value=(args.starting_value or 1.0),
     )
     print(f"[*] Median outcome: {mc['percentiles']['p50_median']:.2f}")
-    print("[*] TODO: write report.")
+    print("[*] TODO: build and write full report.")
 
 
 if __name__ == "__main__":
