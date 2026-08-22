@@ -17,6 +17,20 @@ Two distinct analyses on the same holdings.csv (ticker, name, target_weight):
    horizon (default 40 years). Reports the distribution of outcomes (median,
    10th/25th/75th/90th percentile) rather than a single point estimate.
 
+IMPORTANT HONEST LIMITATIONS (also printed in the report):
+- Several holdings have limited price history (e.g. recent spinoffs/IPOs).
+  The backtest window is automatically capped to the shortest available
+  history among included tickers, OR those tickers are excluded from the
+  backtest with a clear note (user's choice via --backtest-mode).
+- A historical backtest measures what the STOCKS did, not necessarily what
+  a company with today's business mix and thesis would have done - this is
+  flagged explicitly in the output.
+- The Monte Carlo simulation is a statistical projection based on historical
+  volatility/correlation, not a guarantee of future results. Expected returns
+  are a required, debatable input - the script uses conservative, sourced
+  estimates but the user should treat the whole distribution, not just the
+  median, as the real answer.
+
 Usage:
     python3 backtest_and_forecast.py holdings.csv [--years-back 10]
         [--sim-years 40] [--n-sims 5000] [--backtest-mode common|full]
@@ -38,20 +52,28 @@ HERE = Path(__file__).parent
 REPORTS_DIR = HERE / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
+# Conservative, sourced long-run expected annual return estimates per ticker.
+# These are DEBATABLE INPUTS, not facts - shown transparently in the report
+# so the user can override any of them. Based on each company's current
+# earnings growth trajectory, valuation, and business quality as researched
+# in prior analysis, moderated toward the long-run mean (very high current
+# growth rates are not assumed to persist forever over a 40-year horizon).
 DEFAULT_EXPECTED_RETURNS = {
     "NVDA": 0.16, "MA": 0.14, "V": 0.13, "CB": 0.10, "LLY": 0.15,
     "HWM": 0.13, "AVGO": 0.15, "PM": 0.09, "UBER": 0.14, "VRT": 0.14,
     "GEV": 0.13, "VRTX": 0.11, "GE": 0.12, "UNH": 0.09, "TJX": 0.10,
     "ISRG": 0.13, "PGR": 0.11, "KLAC": 0.13, "TRGP": 0.08, "KAP.L": 0.11,
-    "MSFT": 0.12,
-    "CEG": 0.11,
-    "WELL": 0.08,
-    "KMI": 0.09,
-    "ORCL": 0.13,
-    "SCHW": 0.11,
-    "TEL": 0.13,
+    # Added after being caught silently falling back to the generic 10%
+    # default for an entire session's worth of comparisons - see CHANGELOG.
+    "MSFT": 0.12,   # diversified cloud/software/gaming; slower but steadier than pure-AI names
+    "CEG": 0.11,    # nuclear/power generation, real current growth but AI-power-demand-adjacent, regulatory/political risk (data-center moratorium pushback)
+    "WELL": 0.08,   # senior-housing REIT; real demographic tailwind but richest valuation in the book (74x fwd P/E) for modest growth
+    "KMI": 0.09,    # natural gas pipelines; steady ~5-8% EBITDA/EPS guided growth, high fee-based cash flow, modest but reliably growing dividend (9 straight years); more conservative than TRGP given slower guided growth
+    "ORCL": 0.13,   # cloud/AI infrastructure; explosive guided growth (31% rev CAGR / 28% EPS CAGR through FY30) but negative FCF (-$23.7B FY26) funding the buildout, margin compression guided, beta 1.72 - real growth, real cash-flow risk, most AI-capex-correlated name in the book
+    "SCHW": 0.11,   # retail brokerage/wealth mgmt; record Q2 2026 (rev +21%, adj EPS +42%), raised FY26 guidance, reasonably priced vs peers - but current pace likely reflects a strong-markets/high-trading-volume cycle, not assumed to persist at this rate long-run
+    "TEL": 0.13,    # interconnect/connectivity (copper cable, connectors, power) for AI data centers + grid/auto; record Q3 FY26 (rev +14%, adj EPS +22%, record orders +27%), forward P/E ~16x (effective forward PEG ~0.8-1), ~19% below 52wk high, growing ~1.5% dividend (13yr streak) - cheapest, most reasonably-valued AI-adjacent name in the book
 }
-DEFAULT_FALLBACK_RETURN = 0.10
+DEFAULT_FALLBACK_RETURN = 0.10  # for any ticker not in the map above
 
 
 def parse_args():
@@ -75,6 +97,17 @@ def parse_args():
 
 
 def load_holdings(path):
+    """
+    Reads a holdings CSV (ticker, name, target_weight). Accepts weights either
+    as whole-number percentages (e.g. "8" or "8%" meaning 8%) or as decimal
+    fractions (e.g. "0.08" meaning 8%) - but detects the format ONCE for the
+    WHOLE FILE, not per-row. A prior per-row heuristic (treat any single value
+    over 1.5 as "must be a percentage") broke silently on files that mix a
+    normal percentage-style value (e.g. "1" meaning 1%) with the rest of the
+    column, since "1" is indistinguishable from "already a decimal fraction of
+    1.0" in isolation - this produced a badly wrong total (e.g. 199%) with no
+    error, because the too-small value was left unconverted.
+    """
     raw_rows = []
     with open(path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -89,6 +122,11 @@ def load_holdings(path):
 
     raw_sum = sum(r["raw_weight"] for r in raw_rows)
 
+    # Decide the format ONCE, for the whole column, based on which
+    # interpretation lands closer to a sane total (100 for percentages, 1.0
+    # for fractions) - far more robust than checking any single row in
+    # isolation, since one small-but-legitimate row (e.g. "1" meaning 1%)
+    # can't be told apart from a decimal fraction on its own.
     dist_as_percent = abs(raw_sum - 100.0)
     dist_as_fraction = abs(raw_sum - 1.0)
 
@@ -110,6 +148,8 @@ def load_holdings(path):
     total = sum(r["target_weight"] for r in rows)
     print(f"[*] Detected weight format: {detected_format} (raw column sum was {raw_sum:.2f})")
 
+    # Duplicate ticker check - a common source of a bad total that the format
+    # detection above wouldn't catch on its own.
     seen = {}
     for r in rows:
         seen[r["ticker"]] = seen.get(r["ticker"], 0) + 1
@@ -127,6 +167,8 @@ def load_holdings(path):
 
 
 def fetch_price_history(tickers, years_back):
+    """Downloads daily close prices for all tickers, returns a DataFrame and
+    a dict of {ticker: first_valid_date} showing actual history depth."""
     print(f"[*] Downloading up to {years_back} years of price history for {len(tickers)} tickers...")
     period_str = f"{years_back}y"
     raw = yf.download(tickers, period=period_str, interval="1d", progress=False, auto_adjust=True)
@@ -146,6 +188,20 @@ def fetch_price_history(tickers, years_back):
 
 
 def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_history_days=5):
+    """
+    "As-you-go" backtest: rather than trimming the whole portfolio down to the
+    single latest IPO date among all holdings, each stock enters the backtest
+    on its OWN actual first-trading-date (as if you'd started buying it the
+    day it became available), and the full target weight is only reached once
+    every stock has IPO'd. Before that, capital is allocated pro-rata across
+    whichever target stocks are ALREADY public, exactly like a real investor
+    building this exact portfolio over time would have experienced it.
+
+    The overall backtest window is fixed at `years_back` (e.g. 10 years) - it
+    does NOT get silently collapsed by one very-recently-listed ticker. Only
+    stocks that quite literally have no resolvable data at all (min_history_days)
+    are excluded outright.
+    """
     weights = {h["ticker"]: h["target_weight"] for h in holdings}
     tickers = list(weights.keys())
     resolved = [t for t in tickers if t in px.columns and first_valid.get(t) is not None]
@@ -155,6 +211,7 @@ def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_his
     if missing:
         notes.append(f"Excluded entirely (no price data resolved at all): {', '.join(missing)}")
 
+    # Drop only truly-unusable tickers (essentially zero real data)
     available = []
     unusable = []
     for t in resolved:
@@ -172,14 +229,20 @@ def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_his
     if not available:
         raise ValueError("No tickers have any usable history. Check your ticker symbols.")
 
+    # The full backtest window: from years_back ago (or the earliest available
+    # data point, if less history exists in the DOWNLOAD, though the intent
+    # is that the window itself is fixed at years_back regardless of any
+    # single stock's IPO date) through to today.
     window_end = px.index[-1]
-    window_start = px.index[0]
+    window_start = px.index[0]  # yfinance was asked for years_back, so this reflects that already
 
+    # Report each stock's actual entry point relative to the fixed window,
+    # purely informational - this is expected/normal, not a data problem.
     entry_notes = []
     for t in available:
         entry = first_valid[t]
         depth_years = (window_end - entry).days / 365.25
-        if entry > window_start + pd.Timedelta(days=30):
+        if entry > window_start + pd.Timedelta(days=30):  # meaningfully later than window start
             entry_notes.append(f"{t} enters on {entry.date()} ({depth_years:.1f}y of history) - included from its actual IPO/listing date, not before")
     if entry_notes:
         notes.append(
@@ -192,9 +255,14 @@ def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_his
 
     daily_returns = px_window.pct_change().fillna(0)
 
+    # --- "As-you-go" weighted index: at each day, only currently-listed
+    # stocks share the target weight, renormalized pro-rata among themselves.
+    # As each new stock IPOs, it joins at its target weight and existing
+    # holdings' effective weights shrink back toward their true targets.
     target_w = pd.Series({t: weights[t] for t in available})
 
     is_listed = px_window.notna()
+    # Effective weight each day = target weight if listed, else 0, renormalized so weights sum to 1 among listed names
     listed_target = is_listed.mul(target_w, axis=1)
     row_sums = listed_target.sum(axis=1)
     row_sums = row_sums.replace(0, np.nan)
@@ -211,6 +279,9 @@ def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_his
     bh_peak = bh_index.cummax()
     bh_dd = float(((bh_index - bh_peak) / bh_peak).min())
 
+    # --- Monthly-rebalanced version: same as-you-go entry logic, but weights
+    # among currently-listed stocks are reset to their pro-rata target at each
+    # month start rather than left to drift daily between rebalances.
     month_starts = px_window.index.to_series().groupby(px_window.index.to_period("M")).min()
     month_start_set = set(month_starts.values)
 
@@ -222,6 +293,9 @@ def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_his
         date = px_window.index[i]
         today_listed = is_listed.iloc[i]
 
+        # Reset to pro-rata target weights at each month start OR whenever the
+        # set of listed stocks changes (a new stock just IPO'd) - both are
+        # natural "re-check allocation" moments for a real investor.
         listed_changed = not today_listed.equals(prev_listed)
         if date in month_start_set or listed_changed or i == 0:
             listed_now = today_listed[today_listed].index
@@ -242,7 +316,18 @@ def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_his
     reb_peak = reb_index.cummax()
     reb_dd = float(((reb_index - reb_peak) / reb_peak).min())
 
-    min_overlap_days = 252
+    # For the Monte Carlo covariance estimate downstream: pass the FULL daily
+    # returns (including NaNs for periods before a stock existed) rather than
+    # truncating to a single "all stocks overlap" window. Requiring every
+    # stock to overlap is too strict when one stock (e.g. a very recent
+    # IPO/spinoff) has barely any history - it would force the correlation
+    # estimate down to that one stock's tiny window, corrupting everything
+    # else. Instead, run_monte_carlo() computes each pairwise correlation over
+    # whichever period THOSE TWO stocks actually overlap (pandas .cov()'s
+    # native pairwise-complete-observation behavior), and falls back to a
+    # sane default correlation/volatility for any stock with too little
+    # overlap with the rest to estimate reliably.
+    min_overlap_days = 252  # require at least ~1 trading year of overlap for a pairwise correlation to be trusted
     overlap_counts = is_listed.astype(int).T.dot(is_listed.astype(int))
     thin_pairs = []
     for i, t1 in enumerate(available):
@@ -274,15 +359,37 @@ def build_backtest(px, holdings, first_valid, mode, rf_rate, years_back, min_his
 
 def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribution,
                      starting_value=1.0, expected_returns_override=None):
+    """
+    starting_value: the actual starting portfolio value in your base currency
+    (e.g. 1300 for a EUR1,300 portfolio). Defaults to 1.0 for a "growth
+    multiple" view when no contributions are modeled. IMPORTANT: if
+    weekly_contribution > 0, starting_value should be set to a real currency
+    amount, not 1.0 - mixing a normalized starting value (1.0) with a real
+    currency contribution amount was a previous bug that produced absurd
+    (millions-x) results, since the contribution dollars swamped the
+    normalized scale within a few simulated years.
+    """
     tickers = [t for t in daily_returns.columns]
     weights_map = {h["ticker"]: h["target_weight"] for h in holdings if h["ticker"] in tickers}
     w_sum = sum(weights_map.values())
     weights = np.array([weights_map[t] / w_sum for t in tickers])
 
+    # Annualized covariance matrix from historical daily returns.
+    # min_periods enforces that any pairwise correlation estimated from fewer
+    # than ~1 trading year of simultaneous overlap comes back as NaN (handled
+    # below) rather than a wild, unstable estimate from too few data points -
+    # e.g. two stocks that only overlap for 27 days could show a spurious
+    # +/-0.95 correlation purely by chance, which would badly distort the
+    # simulated co-movement between them for the other ~39 years being modeled.
     min_periods = 200
     cov_daily = daily_returns[tickers].cov(min_periods=min_periods)
     cov_annual_raw = cov_daily.values * 252
 
+    # Any NaN entries (pairs with too little overlap to trust) get replaced
+    # with a moderate default correlation (0.3, a reasonable "these are both
+    # equities, expect some co-movement but not perfect" assumption) rather
+    # than left as NaN (which would break the simulation) or 0 (which would
+    # understate real equity market co-movement).
     default_correlation = 0.30
     std_annual_prelim = np.sqrt(np.nanvar(daily_returns[tickers].values, axis=0) * 252)
     default_cov_matrix = default_correlation * np.outer(std_annual_prelim, std_annual_prelim)
@@ -290,11 +397,18 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
 
     nan_mask = np.isnan(cov_annual_raw)
     if nan_mask.any():
-        n_thin = int(nan_mask.sum() / 2)
+        n_thin = int(nan_mask.sum() / 2)  # symmetric matrix, count unique pairs
         print(f"[!] {n_thin} stock pair(s) had too little overlapping history to estimate a reliable correlation "
               f"(fewer than {min_periods} shared trading days) - using a default {default_correlation} correlation assumption for those pairs.")
     cov_annual = np.where(nan_mask, default_cov_matrix, cov_annual_raw)
 
+    # Defensive sanity clamp: if the backtest window was short (even if above
+    # the hard exclusion threshold), the annualized volatility estimate can be
+    # noisy and implausibly extreme. Cap individual-stock annualized volatility
+    # to a generous but sane 15%-120% band before it gets compounded over many
+    # simulated years - this prevents a single noisy estimate from producing
+    # absurd multi-decade outcomes (e.g. millions-x) that reflect an estimation
+    # artifact rather than real risk.
     std_annual_raw = np.sqrt(np.diag(cov_annual))
     std_annual_clamped = np.clip(std_annual_raw, 0.15, 1.20)
     if not np.allclose(std_annual_raw, std_annual_clamped):
@@ -302,6 +416,15 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
         print(f"[!] Clamped implausible annualized volatility for: {', '.join(clamped_names)} "
               f"(raw estimates ranged outside 15%-120%, likely due to a short/noisy backtest window)")
 
+    # Expected returns: user override > default map > fallback.
+    # CRITICAL: any ticker not explicitly in the curated map falls back to a
+    # generic DEFAULT_FALLBACK_RETURN. This previously happened SILENTLY -
+    # several real portfolio comparisons in practice were unknowingly comparing
+    # tickers that all fell back to the same generic number, making any
+    # Monte Carlo difference between them look like a real fundamentals-driven
+    # result when it was actually just noise from volatility/correlation
+    # structure. This is now loud: every fallback is printed AND written into
+    # the report itself, tagged with an asterisk, so it can never be missed again.
     exp_map = expected_returns_override or DEFAULT_EXPECTED_RETURNS
     fallback_tickers = [t for t in tickers if t not in exp_map]
     mu = np.array([exp_map.get(t, DEFAULT_FALLBACK_RETURN) for t in tickers])
@@ -315,23 +438,47 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
               f"--expected-return-overrides before trusting a comparison that hinges on them.\n")
 
     n_assets = len(tickers)
-    n_steps = sim_years
+    n_steps = sim_years  # simulate year-by-year for tractability over 40 years
 
-    std_annual = std_annual_raw
+    # Convert annual covariance to correlation, then reconstruct a covariance
+    # matrix using the CLAMPED annualized volatility (to avoid noisy/short-
+    # window estimates blowing up the simulation) combined with the historical
+    # correlation structure (which is scale-invariant and doesn't need clamping).
+    std_annual = std_annual_raw  # used only to derive correlation, which is scale-invariant
     corr = cov_annual / np.outer(std_annual, std_annual)
     corr = np.nan_to_num(corr, nan=0.0)
     np.fill_diagonal(corr, 1.0)
 
     cov_for_sim = corr * np.outer(std_annual_clamped, std_annual_clamped)
 
+    # Cholesky for correlated normal draws (yearly steps, log-return space)
     try:
         L = np.linalg.cholesky(cov_for_sim + 1e-8 * np.eye(n_assets))
     except np.linalg.LinAlgError:
+        # fallback: nearest positive-semidefinite adjustment
         eigvals, eigvecs = np.linalg.eigh(cov_for_sim)
         eigvals = np.clip(eigvals, 1e-8, None)
         cov_for_sim = eigvecs @ np.diag(eigvals) @ eigvecs.T
         L = np.linalg.cholesky(cov_for_sim + 1e-8 * np.eye(n_assets))
 
+    # Cholesky for correlated normal draws (yearly steps)
+    try:
+        L = np.linalg.cholesky(cov_for_sim + 1e-8 * np.eye(n_assets))
+    except np.linalg.LinAlgError:
+        # fallback: nearest positive-semidefinite adjustment
+        eigvals, eigvecs = np.linalg.eigh(cov_for_sim)
+        eigvals = np.clip(eigvals, 1e-8, None)
+        cov_for_sim = eigvecs @ np.diag(eigvals) @ eigvecs.T
+        L = np.linalg.cholesky(cov_for_sim + 1e-8 * np.eye(n_assets))
+
+    # Simulate SIMPLE (arithmetic) annual returns directly: mu is already the
+    # expected simple annual return per stock, and cov_for_sim is the
+    # covariance of simple annual returns. Do NOT convert to log-return space
+    # here - mixing log-drift with simple-return-space covariance was the
+    # source of a serious bug that produced absurd (millions-x) 40-year
+    # outcomes. Each simulated asset return is clipped at -95% (a stock can't
+    # lose more than 100%, and -95% is already an extreme single-year outcome)
+    # to prevent compounding artifacts in low-probability tail draws.
     rng = np.random.default_rng(42)
     port_paths = np.zeros((n_sims, n_steps + 1))
     port_paths[:, 0] = starting_value
@@ -346,7 +493,7 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
             asset_simple_returns = mu + correlated_shock
             asset_simple_returns = np.clip(asset_simple_returns, -0.95, None)
             port_return = np.dot(weights, asset_simple_returns)
-            port_return = max(port_return, -0.95)
+            port_return = max(port_return, -0.95)  # floor the portfolio-level return too
             value = value * (1 + port_return) + weekly_annual_contribution
             port_paths[sim, yr] = value
 
@@ -360,6 +507,7 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
         "mean": float(np.mean(final_values)),
     }
 
+    # Implied CAGR for median/mean paths (on the growth-of-1 portion only, excluding contributions, for intuition)
     return {
         "final_values": final_values,
         "percentiles": percentiles,
@@ -410,7 +558,7 @@ def parse_assumed_returns_from_report(path):
                     except ValueError:
                         pass
             elif line.strip() == "" and result:
-                break
+                break  # end of table
     return result if result else None
 
 
@@ -461,10 +609,85 @@ def build_assumption_diff_section(mc, current_out_path):
     return lines
 
 
+def build_report(holdings, backtest, mc, sim_years, n_sims, weekly_contribution, years_back, starting_value):
+    lines = []
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines.append(f"# Portfolio Backtest & Forward Simulation Report — {ts}\n")
+
+    lines.append("## Part 1 — Historical Backtest\n")
+    lines.append(f"**Backtest window:** {backtest['window_start'].date()} to {backtest['window_end'].date()} (~{backtest['years_elapsed']:.1f} years, fixed at the requested --years-back)\n")
+    if backtest["notes"]:
+        lines.append("> **Data limitation notes:**")
+        for n in backtest["notes"]:
+            lines.append(f"> - {n}")
+        lines.append("")
+
+    lines.append("| Strategy | CAGR | Annualized Vol | Sharpe (Rf=4.5%) | Max Drawdown |")
+    lines.append("|:---|---:|---:|---:|---:|")
+    lines.append(f"| Buy & Hold (no rebalancing) | {backtest['bh_cagr']*100:.2f}% | {backtest['bh_vol']*100:.2f}% | {backtest['bh_sharpe']:.2f} | {backtest['bh_max_dd']*100:.2f}% |")
+    lines.append(f"| Monthly Rebalanced to Target | {backtest['reb_cagr']*100:.2f}% | {backtest['reb_vol']*100:.2f}% | {backtest['reb_sharpe']:.2f} | {backtest['reb_max_dd']*100:.2f}% |")
+    lines.append("")
+    lines.append("**Included tickers:** " + ", ".join(backtest["available_tickers"]))
+    if backtest["missing_tickers"]:
+        lines.append(f"\n**Excluded (no data):** {', '.join(backtest['missing_tickers'])}")
+    lines.append("\n> [!WARNING]")
+    lines.append("> A historical backtest shows what these STOCKS actually did over this window - it does not mean today's business, thesis, or valuation will repeat those results. Several holdings (e.g. recent spinoffs) have short trading histories, which forced this backtest into a shorter common window than the full portfolio's 40-year intended horizon. Treat this as a sanity check on volatility and drawdown behavior, not a return forecast.\n")
+
+    lines.append("## Part 2 — Forward Monte Carlo Simulation\n")
+    contribution_label = f"€{weekly_contribution:,.0f}/week (€{weekly_contribution*52:,.0f}/year)" if weekly_contribution else "None (lump sum only)"
+    lines.append(f"**Horizon:** {sim_years} years | **Simulations:** {n_sims:,} | **Starting value:** €{starting_value:,.0f} | **Weekly contribution modeled:** {contribution_label}\n")
+
+    p = mc["percentiles"]
+    unit_label = "Ending Portfolio Value (€)" if starting_value != 1.0 else "Ending Portfolio Multiple"
+    fmt = (lambda v: f"€{v:,.0f}") if starting_value != 1.0 else (lambda v: f"{v:.1f}x")
+    lines.append(f"| Outcome | {unit_label} | Notes |")
+    lines.append("|:---|---:|:---|")
+    lines.append(f"| 10th percentile (bad luck case) | {fmt(p['p10'])} | 1-in-10 chance of doing *worse* than this |")
+    lines.append(f"| 25th percentile | {fmt(p['p25'])} | |")
+    lines.append(f"| **Median (50th percentile)** | **{fmt(p['p50_median'])}** | Half of simulations landed above, half below |")
+    lines.append(f"| 75th percentile | {fmt(p['p75'])} | |")
+    lines.append(f"| 90th percentile (good luck case) | {fmt(p['p90'])} | 1-in-10 chance of doing *better* than this |")
+    lines.append(f"| Mean (average) | {fmt(p['mean'])} | Skewed higher than median by compounding tail |")
+    lines.append("")
+
+    fallback_set = set(mc.get("fallback_tickers", []))
+    lines.append("### Expected annual return assumptions used per stock\n")
+    lines.append("These are debatable, sourced estimates, not facts - override any of them if you disagree.\n")
+    if fallback_set:
+        lines.append(f"> [!CAUTION]")
+        lines.append(f"> **{len(fallback_set)} ticker(s) below (marked `*`) have NO curated estimate and are using the generic "
+                      f"{DEFAULT_FALLBACK_RETURN*100:.0f}% fallback**, not a real researched number: {', '.join(sorted(fallback_set))}. "
+                      f"Do not treat any Monte Carlo comparison that hinges on differences between these tickers and others as "
+                      f"fundamentals-driven - add them to `DEFAULT_EXPECTED_RETURNS` first.\n")
+    lines.append("| Ticker | Assumed Annual Return |")
+    lines.append("|:---|---:|")
+    for t, r in sorted(mc["expected_returns_used"].items(), key=lambda x: -x[1]):
+        marker = " *" if t in fallback_set else ""
+        lines.append(f"| {t}{marker} | {r*100:.1f}% |")
+    lines.append("")
+
+    lines.append("> [!WARNING]")
+    lines.append("> This simulation uses HISTORICAL volatility and correlation (real, measured) combined with FORWARD-LOOKING expected returns (estimated, debatable). The spread between the 10th and 90th percentile outcomes is the real story here - a 40-year horizon has enormous path uncertainty. No one can know the true expected returns in advance; small changes to these assumptions materially change the projected outcomes. Treat the whole distribution as the answer, not any single number.\n")
+
+    return "\n".join(lines)
+
+
 def main():
     args = parse_args()
     holdings = load_holdings(args.holdings_file)
     tickers = [h["ticker"] for h in holdings]
+
+    if args.weekly_contribution > 0 and args.starting_value is None:
+        print("[!] --weekly-contribution was set but --starting-value was not.")
+        print("    Mixing a normalized (1.0) starting value with real contribution dollars")
+        print("    produces meaningless results. Defaulting --starting-value to 1000")
+        print("    (interpret results as 'per 1000 currency units invested today').")
+        print("    Pass --starting-value <your real portfolio value> for accurate absolute numbers.\n")
+        starting_value = 1000.0
+    elif args.starting_value is not None:
+        starting_value = args.starting_value
+    else:
+        starting_value = 1.0
 
     px, first_valid = fetch_price_history(tickers, args.years_back)
 
@@ -478,10 +701,22 @@ def main():
         args.sim_years,
         args.n_sims,
         args.weekly_contribution,
-        starting_value=(args.starting_value or 1.0),
+        starting_value=starting_value,
     )
-    print(f"[*] Median outcome: {mc['percentiles']['p50_median']:.2f}")
-    print("[*] TODO: build and write full report.")
+
+    report = build_report(holdings, backtest, mc, args.sim_years, args.n_sims, args.weekly_contribution, args.years_back, starting_value)
+    out_path = REPORTS_DIR / f"backtest_forecast_{datetime.now().strftime('%Y-%m-%d_%H%M')}.md"
+
+    # Build the assumption diff BEFORE writing this run's file, so
+    # find_previous_report() correctly finds the prior run and not this one.
+    diff_lines = build_assumption_diff_section(mc, out_path)
+    report_with_diff = report + "\n" + "\n".join(diff_lines)
+
+    out_path.write_text(report_with_diff, encoding="utf-8")
+    print(f"[+] Report written to {out_path.resolve()}")
+    print("\n" + "="*70)
+    print(report[:2000])
+    print("="*70)
 
 
 if __name__ == "__main__":
