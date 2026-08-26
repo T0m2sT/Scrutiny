@@ -1,0 +1,5 @@
+ticker,name,target_weight
+AAPL,Apple,0.25
+MSFT,Microsoft,0.25
+JNJ,Johnson & Johnson,0.25
+VNQ,Vanguard Real Estate ETF,0.25
