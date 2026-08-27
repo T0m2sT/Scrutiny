@@ -40,6 +40,20 @@ Flags:
 - `--base-currency` — currency to normalize all holdings into (default `USD`)
 - `--rf-rate` — annual risk-free rate for Sharpe ratio (default `0.045`)
 
+## Expected returns file (optional)
+
+`backtest_and_forecast.py` uses per-ticker expected annual returns to drive the Monte Carlo forecast. By default it looks for `expected_returns.csv` (gitignored, since these are your own debatable estimates) with `ticker,expected_return`. See `expected_returns.example.csv`:
+
+```csv
+ticker,expected_return
+AAPL,0.11
+MSFT,0.12
+JNJ,0.08
+VNQ,0.07
+```
+
+Any ticker missing from the file falls back to a generic 10% estimate, and the report flags this loudly so it's never silently assumed.
+
 ## Running the backtest + Monte Carlo forecast
 
 ```bash

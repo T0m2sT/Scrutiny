@@ -1,0 +1,5 @@
+ticker,expected_return
+AAPL,0.11
+MSFT,0.12
+JNJ,0.08
+VNQ,0.07

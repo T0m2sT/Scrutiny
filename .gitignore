@@ -6,6 +6,7 @@
 holdings.csv
 portfolio_*.csv
 Version_*.csv
+expected_returns.csv
 
 # Real report runs (contain real holdings/metrics); example reports are tracked explicitly
 reports/*.md

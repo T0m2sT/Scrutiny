@@ -52,28 +52,27 @@ HERE = Path(__file__).parent
 REPORTS_DIR = HERE / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
-# Conservative, sourced long-run expected annual return estimates per ticker.
-# These are DEBATABLE INPUTS, not facts - shown transparently in the report
-# so the user can override any of them. Based on each company's current
-# earnings growth trajectory, valuation, and business quality as researched
-# in prior analysis, moderated toward the long-run mean (very high current
-# growth rates are not assumed to persist forever over a 40-year horizon).
-DEFAULT_EXPECTED_RETURNS = {
-    "NVDA": 0.16, "MA": 0.14, "V": 0.13, "CB": 0.10, "LLY": 0.15,
-    "HWM": 0.13, "AVGO": 0.15, "PM": 0.09, "UBER": 0.14, "VRT": 0.14,
-    "GEV": 0.13, "VRTX": 0.11, "GE": 0.12, "UNH": 0.09, "TJX": 0.10,
-    "ISRG": 0.13, "PGR": 0.11, "KLAC": 0.13, "TRGP": 0.08, "KAP.L": 0.11,
-    # Added after being caught silently falling back to the generic 10%
-    # default for an entire session's worth of comparisons - see CHANGELOG.
-    "MSFT": 0.12,   # diversified cloud/software/gaming; slower but steadier than pure-AI names
-    "CEG": 0.11,    # nuclear/power generation, real current growth but AI-power-demand-adjacent, regulatory/political risk (data-center moratorium pushback)
-    "WELL": 0.08,   # senior-housing REIT; real demographic tailwind but richest valuation in the book (74x fwd P/E) for modest growth
-    "KMI": 0.09,    # natural gas pipelines; steady ~5-8% EBITDA/EPS guided growth, high fee-based cash flow, modest but reliably growing dividend (9 straight years); more conservative than TRGP given slower guided growth
-    "ORCL": 0.13,   # cloud/AI infrastructure; explosive guided growth (31% rev CAGR / 28% EPS CAGR through FY30) but negative FCF (-$23.7B FY26) funding the buildout, margin compression guided, beta 1.72 - real growth, real cash-flow risk, most AI-capex-correlated name in the book
-    "SCHW": 0.11,   # retail brokerage/wealth mgmt; record Q2 2026 (rev +21%, adj EPS +42%), raised FY26 guidance, reasonably priced vs peers - but current pace likely reflects a strong-markets/high-trading-volume cycle, not assumed to persist at this rate long-run
-    "TEL": 0.13,    # interconnect/connectivity (copper cable, connectors, power) for AI data centers + grid/auto; record Q3 FY26 (rev +14%, adj EPS +22%, record orders +27%), forward P/E ~16x (effective forward PEG ~0.8-1), ~19% below 52wk high, growing ~1.5% dividend (13yr streak) - cheapest, most reasonably-valued AI-adjacent name in the book
-}
-DEFAULT_FALLBACK_RETURN = 0.10  # for any ticker not in the map above
+DEFAULT_EXPECTED_RETURNS_FILE = HERE / "expected_returns.csv"
+DEFAULT_FALLBACK_RETURN = 0.10  # for any ticker with no estimate in the expected-returns file
+
+
+def load_expected_returns(path=DEFAULT_EXPECTED_RETURNS_FILE):
+    """
+    Loads conservative, sourced long-run expected annual return estimates per
+    ticker from a CSV (ticker,expected_return). These are DEBATABLE INPUTS,
+    not facts - shown transparently in the report so the user can override
+    any of them. Returns {} if the file doesn't exist (every ticker then
+    falls back to DEFAULT_FALLBACK_RETURN, loudly flagged in the report).
+    """
+    if not Path(path).exists():
+        return {}
+    result = {}
+    with open(path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            ticker = r["ticker"].strip().upper()
+            result[ticker] = float(r["expected_return"])
+    return result
 
 
 def parse_args():
@@ -425,7 +424,7 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
     # result when it was actually just noise from volatility/correlation
     # structure. This is now loud: every fallback is printed AND written into
     # the report itself, tagged with an asterisk, so it can never be missed again.
-    exp_map = expected_returns_override or DEFAULT_EXPECTED_RETURNS
+    exp_map = expected_returns_override or load_expected_returns()
     fallback_tickers = [t for t in tickers if t not in exp_map]
     mu = np.array([exp_map.get(t, DEFAULT_FALLBACK_RETURN) for t in tickers])
 
@@ -434,7 +433,7 @@ def run_monte_carlo(holdings, daily_returns, sim_years, n_sims, weekly_contribut
               f"estimate and are using the generic {DEFAULT_FALLBACK_RETURN*100:.0f}% fallback: "
               f"{', '.join(fallback_tickers)}")
         print(f"    This means any Monte Carlo comparison involving these tickers may not reflect "
-              f"their real fundamentals - add a real estimate to DEFAULT_EXPECTED_RETURNS or pass "
+              f"their real fundamentals - add a real estimate to {DEFAULT_EXPECTED_RETURNS_FILE.name} or pass "
               f"--expected-return-overrides before trusting a comparison that hinges on them.\n")
 
     n_assets = len(tickers)
@@ -658,7 +657,7 @@ def build_report(holdings, backtest, mc, sim_years, n_sims, weekly_contribution,
         lines.append(f"> **{len(fallback_set)} ticker(s) below (marked `*`) have NO curated estimate and are using the generic "
                       f"{DEFAULT_FALLBACK_RETURN*100:.0f}% fallback**, not a real researched number: {', '.join(sorted(fallback_set))}. "
                       f"Do not treat any Monte Carlo comparison that hinges on differences between these tickers and others as "
-                      f"fundamentals-driven - add them to `DEFAULT_EXPECTED_RETURNS` first.\n")
+                      f"fundamentals-driven - add them to `{DEFAULT_EXPECTED_RETURNS_FILE.name}` first.\n")
     lines.append("| Ticker | Assumed Annual Return |")
     lines.append("|:---|---:|")
     for t, r in sorted(mc["expected_returns_used"].items(), key=lambda x: -x[1]):
