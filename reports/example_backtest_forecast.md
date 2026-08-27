@@ -1,4 +1,4 @@
-# Portfolio Backtest & Forward Simulation Report — 2026-08-27 03:15
+# Portfolio Backtest & Forward Simulation Report — 2026-08-27 03:25
 
 ## Part 1 — Historical Backtest
 
@@ -43,9 +43,4 @@ These are debatable, sourced estimates, not facts - override any of them if you 
 
 ## Assumption Diff vs. Previous Run
 
-Compared against: `backtest_forecast_2026-08-23_0111.md`
-
-**Assumptions DIFFER from the previous run** - a Monte Carlo difference here may reflect a real, deliberate change, not just noise. Details:
-
-New tickers in this run (not in previous): AAPL, JNJ, VNQ
-Tickers dropped since previous run: AVGO, CB, CEG, GE, GEV, HWM, ISRG, KAP.L, KLAC, LLY, MA, NVDA, ORCL, PGR, PM, SCHW, TJX, TRGP, UBER, UNH, V, VRT, VRTX
+No previous report found in `reports/` to compare against - this is treated as the first baseline run.
